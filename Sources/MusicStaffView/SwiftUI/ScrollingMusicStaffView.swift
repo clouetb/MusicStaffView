@@ -4,47 +4,119 @@
 //
 //  Created: 24 Jul 2025
 //
+//  This SwiftUI wrapper renders:
+//   1) A **fixed** staff (clef + 5 lines) that never scrolls.
+//   2) A stream of **scrolling notes** (each drawn by its own tiny UIMusicStaffView)
+//      that are **masked** on the left so they appear to disappear “behind” the clef.
+//   3) A **fixed vertical red playhead** located a bit to the right of the clef.
+//      The view-model exposes the note that currently lies under that playhead
+//      through `payingNote` (name kept to match your original request).
+//
 
 import SwiftUI
 import Music
 import UIKit
 
-/// A SwiftUI wrapper that shows a static staff (clef + 5 lines) and
-/// a stream of scrolling notes rendered on top, while hiding any note
-/// that would visually pass under the clef using a left-side mask.
 @available(iOS 15.0, *)
 public struct ScrollingMusicStaffView: View {
 
-    // MARK: - Public, immutable configuration
+    // MARK: - External control (binding) --------------------------------------
 
-    /// Maximum number of ledger lines that the underlying UIKit view is allowed to draw.
+    /// Externally-driven BPM. Using a `Binding` ensures the slider actually
+    /// drives the underlying model in real time.
+    @Binding private var bpm: Double
+
+    // MARK: - Public configuration -------------------------------------------
+
     private let maxLedgerLines: Int
-
-    /// Base staff "space" height, in points, before visual scaling is applied.
     private let spaceWidth: CGFloat
-
-    /// Extra horizontal spacing between two notes, expressed in beats.
     private let beatGapBetweenNotes: Double
-
-    /// Global visual scale factor applied to the staff height (and thus to `spaceWidth`).
     private let visualScale: CGFloat
+    private let spacingStrategy: NoteSpacingStrategy
 
-    /// Small padding (in staff *spaces*) added to the measured clef width
-    /// to decide where the left-side mask (the "curtain") starts.
-    private let clefPaddingInSpaces: CGFloat = 0.3
+    /// Explicit pixels-per-beat used to map beats to screen speed. This allows
+    /// you to decouple *visual* speed from the spacing strategy of the staff.
+    private let scrollPixelsPerBeat: CGFloat
 
-    // MARK: - Reactive model
+    /// Extra horizontal padding (in *spaces*) added to the measured clef width
+    /// to compute the left “curtain” that hides notes under the clef.
+    private let clefPaddingInSpaces: CGFloat
 
-    /// The view model that drives time, positions and culling.
+    /// Distance (in *spaces*) between the curtain (mask) and the red playhead.
+    private let playheadOffsetInSpaces: CGFloat
+
+    /// Playhead visual properties.
+    private let playheadWidth: CGFloat
+    private let playheadColor: Color
+
+    /// Optional callback invoked whenever the `payingNote` changes.
+    private var payingNoteHandler: ((MusicNote?) -> Void)?
+
+    // MARK: - Reactive model --------------------------------------------------
+
+    /// The driving view-model (time-keeping, pruning, note under playhead, …).
     @StateObject private var model: ScrollingMusicStaffViewModel
 
-    // MARK: - Runtime measurements
+    // MARK: - Runtime measurements -------------------------------------------
 
-    /// Measured clef width (in points) coming from the UIKit staff view.
-    @State private var clefPixelWidth: CGFloat = 0
+    /// The **right-most X** (in SwiftUI coordinates) of the drawn clef (used to
+    /// position both the mask and the playhead precisely).
+    @State private var clefRightEdge: CGFloat = 0
 
-    // MARK: - Initializer
+    // MARK: - Designated init (Binding BPM) ----------------------------------
 
+    /// Designated initializer, used when the tempo is externally controlled
+    /// (e.g. by a SwiftUI `Slider`) via a `Binding<Double>`.
+    public init(
+        bpm: Binding<Double>,
+        clef: MusicClef = .treble,
+        spacingStrategy: NoteSpacingStrategy = .fromPreferredOrDefault(),
+        initialNotes: [MusicNote] = [],
+        maxLedgerLines: Int = 4,
+        spaceWidth: CGFloat = 8,
+        beatGapBetweenNotes: Double = 1.0,
+        visualScale: CGFloat = 1.2,
+        scrollPixelsPerBeat: CGFloat = 120,          // Visual horizontal speed.
+        clefPaddingInSpaces: CGFloat = 0.0,
+        playheadOffsetInSpaces: CGFloat = 1.6,
+        playheadWidth: CGFloat = 3.0,
+        playheadColor: Color = .red.opacity(0.9)
+    ) {
+        self._bpm = bpm
+
+        // Convert the caller's MusicNote array to the model input type.
+        let seeds = initialNotes.map {
+            ScrollingMusicStaffViewModel.ScrollingNoteInput($0, duration: .quarter)
+        }
+
+        // Create the model (StateObject) with initial state.
+        _model = StateObject(
+            wrappedValue: ScrollingMusicStaffViewModel(
+                bpm: bpm.wrappedValue,
+                clef: clef,
+                spacing: spacingStrategy,
+                initialNotes: seeds,
+                beatGapBetweenNotes: beatGapBetweenNotes
+            )
+        )
+
+        // Store all configuration values locally.
+        self.maxLedgerLines           = maxLedgerLines
+        self.spaceWidth               = spaceWidth
+        self.beatGapBetweenNotes      = beatGapBetweenNotes
+        self.visualScale              = visualScale
+        self.spacingStrategy          = spacingStrategy
+        self.scrollPixelsPerBeat      = scrollPixelsPerBeat
+        self.clefPaddingInSpaces      = clefPaddingInSpaces
+        self.playheadOffsetInSpaces   = playheadOffsetInSpaces
+        self.playheadWidth            = playheadWidth
+        self.playheadColor            = playheadColor
+    }
+
+    // MARK: - Convenience init (constant BPM) --------------------------------
+
+    /// Convenience initializer for when the BPM is **not** driven by a `Binding`.
+    /// It simply wraps the provided constant into a `.constant` binding.
     public init(
         bpm: Double,
         clef: MusicClef = .treble,
@@ -53,53 +125,91 @@ public struct ScrollingMusicStaffView: View {
         maxLedgerLines: Int = 4,
         spaceWidth: CGFloat = 8,
         beatGapBetweenNotes: Double = 1.0,
-        visualScale: CGFloat = 1.2   // +20% by default
+        visualScale: CGFloat = 1.2,
+        scrollPixelsPerBeat: CGFloat = 120,
+        clefPaddingInSpaces: CGFloat = 0.0,
+        playheadOffsetInSpaces: CGFloat = 1.6,
+        playheadWidth: CGFloat = 3.0,
+        playheadColor: Color = .red.opacity(0.9)
     ) {
-        let seeds = initialNotes.map {
-            ScrollingMusicStaffViewModel.ScrollingNoteInput($0, duration: .quarter)
-        }
-
-        _model = StateObject(
-            wrappedValue: ScrollingMusicStaffViewModel(
-                bpm: bpm,
-                clef: clef,
-                spacing: spacingStrategy,
-                initialNotes: seeds,
-                beatGapBetweenNotes: beatGapBetweenNotes
-            )
+        self.init(
+            bpm: .constant(bpm),
+            clef: clef,
+            spacingStrategy: spacingStrategy,
+            initialNotes: initialNotes,
+            maxLedgerLines: maxLedgerLines,
+            spaceWidth: spaceWidth,
+            beatGapBetweenNotes: beatGapBetweenNotes,
+            visualScale: visualScale,
+            scrollPixelsPerBeat: scrollPixelsPerBeat,
+            clefPaddingInSpaces: clefPaddingInSpaces,
+            playheadOffsetInSpaces: playheadOffsetInSpaces,
+            playheadWidth: playheadWidth,
+            playheadColor: playheadColor
         )
-
-        self.maxLedgerLines       = maxLedgerLines
-        self.spaceWidth           = spaceWidth
-        self.beatGapBetweenNotes  = beatGapBetweenNotes
-        self.visualScale          = visualScale
     }
 
-    // MARK: - Body
+    // MARK: - Fluent API ------------------------------------------------------
+
+    /// Registers a callback to be notified whenever the playing note changes.
+    public func onPayingNoteChange(_ handler: @escaping (MusicNote?) -> Void) -> Self {
+        var copy = self
+        copy.payingNoteHandler = handler
+        return copy
+    }
+
+    /// Adds more notes to the scrolling timeline.
+    public func addNotes(_ notes: [MusicNote]) {
+        let inputs = notes.map {
+            ScrollingMusicStaffViewModel.ScrollingNoteInput($0, duration: .quarter)
+        }
+        model.enqueue(inputs)
+    }
+
+    /// Shortcut to the model’s current paying note.
+    public var payingNote: MusicNote? {
+        model.payingNote
+    }
+
+    // MARK: - View body -------------------------------------------------------
 
     public var body: some View {
-        // We enlarge the staff visually by scaling the space height.
+        // Effective (scaled) space width. This is a visual zoom of the staff.
         let scaledSpaceWidth = spaceWidth * visualScale
+
+        // View height based on space width and the number of ledger lines we want
+        // to reserve above & below the 5 staff lines.
         let height = StaffMetrics.height(spaceWidth: scaledSpaceWidth,
                                          maxLedgerLines: maxLedgerLines)
 
         return GeometryReader { geo in
+            // Compute the curtain (mask) origin & the playhead X every layout pass.
+            let curtainX  = clefRightEdge + clefPaddingInSpaces * scaledSpaceWidth
+            let playheadX = curtainX + playheadOffsetInSpaces * scaledSpaceWidth
+
             ZStack(alignment: .topLeading) {
 
-                // 1) Static staff (clef + 5 lines) – NOT masked.
+                // 1) Static staff (clef + 5 lines) – NOT masked,
+                //    so the clef remains visible at all times.
                 StaffLayer(
                     clef: model.clef,
                     maxLedgerLines: maxLedgerLines,
                     fitsToBounds: false,
-                    clefWidth: $clefPixelWidth
+                    clefRightEdge: $clefRightEdge
                 )
                 .frame(maxWidth: .infinity,
                        maxHeight: .infinity,
                        alignment: .topLeading)
                 .allowsHitTesting(false)
 
-                // 2) Moving notes (each one draws its own ledger lines),
-                //    masked on the left so they disappear before going under the clef.
+                // 2) Fixed red playhead.
+                Rectangle()
+                    .fill(playheadColor)
+                    .frame(width: playheadWidth, height: geo.size.height)
+                    .offset(x: playheadX)
+
+                // 3) Scrolling notes (each mini UIMusicStaffView draws its own ledger lines).
+                //    This is masked so notes vanish behind the clef instead of overlapping it.
                 ZStack(alignment: .topLeading) {
                     ForEach(model.notes) { scrolling in
                         NoteView(
@@ -115,103 +225,117 @@ public struct ScrollingMusicStaffView: View {
                 .mask(
                     Rectangle()
                         .frame(
-                            width: max(
-                                0,
-                                geo.size.width - (clefPixelWidth + clefPaddingInSpaces * scaledSpaceWidth)
-                            ),
+                            width: max(0, geo.size.width - curtainX),
                             height: geo.size.height
                         )
-                        .offset(x: clefPixelWidth + clefPaddingInSpaces * scaledSpaceWidth)
+                        .offset(x: curtainX)
                 )
             }
             .clipped()
             .onAppear {
+                // Push the initial tempo & the “pixels per beat” used for scrolling.
+                model.bpm = bpm
+                model.updatePixelsPerBeat(pixels: scrollPixelsPerBeat)
+
+                // Synchronize runtime values used by the VM.
                 model.updateCanvasWidth(geo.size.width)
+                model.updatePlayheadX(playheadX)
+
+                // Kick off the display link.
                 model.start()
             }
-            .onChange(of: geo.size) { newSize in
-                model.updateCanvasWidth(newSize.width)
+            .onChange(of: bpm) { newValue in
+                // Live tempo changes from the parent slider.
+                model.bpm = newValue
             }
-            .onDisappear { model.stop() }
+            .onChange(of: geo.size) { newSize in
+                // Keep the VM updated with the visible width & playhead position.
+                model.updateCanvasWidth(newSize.width)
+                model.updatePlayheadX(playheadX)
+            }
+            .onChange(of: clefRightEdge) { _ in
+                // If the clef width changes (rotation, resizes…), update playhead.
+                model.updatePlayheadX(playheadX)
+            }
+            .onReceive(model.$payingNote) { note in
+                // Bubble the notification up if the caller registered a handler.
+                payingNoteHandler?(note)
+            }
+            .onDisappear {
+                model.stop()
+            }
         }
         .frame(height: height)
     }
-
-    // MARK: - Public API passthroughs
-
-    /// Change tempo on the fly.
-    public func setBPM(_ newBPM: Double) {
-        model.bpm = newBPM
-    }
-
-    /// Enqueue extra notes to scroll in from the right.
-    public func addNotes(_ notes: [MusicNote]) {
-        let inputs = notes.map {
-            ScrollingMusicStaffViewModel.ScrollingNoteInput($0, duration: .quarter)
-        }
-        model.enqueue(inputs)
-    }
-
-    /// Convenience access to the left-most visible note.
-    public var leftMostVisibleNote: MusicNote? {
-        model.leftMostVisibleNote
-    }
 }
 
-// MARK: - Staff metrics
+// MARK: - Helpers -------------------------------------------------------------
 
 @available(iOS 15.0, *)
 private enum StaffMetrics {
-    /// Computes the full height for a staff that reserves room for
-    /// `maxLedgerLines` above and below, assuming `fitsStaffToBounds == false`.
+    /// Computes the total height of the staff (including the extra space for
+    /// ledger lines) such that the *visual* `spaceWidth` stays constant.
+    ///
+    /// In `UIMusicStaffView`:
+    ///   `spaceWidth = height / (6 + (above + below))`
+    /// Here `above == below == maxLedgerLines`, so:
+    ///   `height = spaceWidth * (6 + 2 * maxLedgerLines)`
     static func height(spaceWidth: CGFloat, maxLedgerLines: Int) -> CGFloat {
         spaceWidth * (6.0 + CGFloat(2 * maxLedgerLines))
     }
 }
 
-// MARK: - Static staff (clef + 5 lines, no notes)
+// MARK: - Static staff (lines + clef) ----------------------------------------
 
+/// A thin `UIViewRepresentable` wrapper around `UIMusicStaffView` used to render
+/// the **static** staff and to **measure** the clef’s real width (so we know
+/// where to start masking notes and where to place the playhead).
 @available(iOS 15.0, *)
 private struct StaffLayer: UIViewRepresentable {
     let clef: MusicClef
     let maxLedgerLines: Int
     let fitsToBounds: Bool
 
-    /// Binding used to report the measured clef width (in points) back to SwiftUI.
-    @Binding var clefWidth: CGFloat
+    /// The measured **right-most X** of the clef is reported back to SwiftUI.
+    @Binding var clefRightEdge: CGFloat
 
     func makeUIView(context: Context) -> UIMusicStaffView {
         let v = UIMusicStaffView()
-        v.elementArray = [clef]
-        v.maxLedgerLines = maxLedgerLines
-        v.shouldDrawClef = true
+        v.elementArray       = [clef]
+        v.maxLedgerLines     = maxLedgerLines
+        v.shouldDrawClef     = true
         v.shouldDrawNaturals = false
-        v.fitsStaffToBounds = fitsToBounds
-        v.spacing = .uniformTrailingSpace
+        v.fitsStaffToBounds  = fitsToBounds
+        v.spacing            = .uniformTrailingSpace
         v.isUserInteractionEnabled = false
         return v
     }
 
     func updateUIView(_ uiView: UIMusicStaffView, context: Context) {
-        uiView.elementArray = [clef]
-        uiView.maxLedgerLines = maxLedgerLines
-        uiView.fitsStaffToBounds = fitsToBounds
+        uiView.elementArray       = [clef]
+        uiView.maxLedgerLines     = maxLedgerLines
+        uiView.fitsStaffToBounds  = fitsToBounds
         uiView.setNeedsDisplay()
 
-        // Measure the clef width after layout: the first sublayer of elementDisplayLayer
-        // is the clef (since elementArray = [clef]).
+        // Measure the clef width on the *next* run loop to ensure layers are laid out.
         DispatchQueue.main.async {
             guard let clefLayer = uiView.elementDisplayLayer.sublayers?.first else { return }
-            let width = clefLayer.bounds.width
-            if abs(self.clefWidth - width) > 0.5 {
-                self.clefWidth = width
+            // Convert the clef layer frame to the staff view’s coordinate space
+            // and extract the **right-most** X (= maxX).
+            let frameInView = uiView.layer.convert(clefLayer.frame, from: uiView.elementDisplayLayer)
+            let right = frameInView.maxX
+            if abs(self.clefRightEdge - right) > 0.5 {
+                self.clefRightEdge = right
             }
         }
     }
 }
 
-// MARK: - One scrolling note wrapper
+// MARK: - Note micro-view -----------------------------------------------------
 
+/// Wraps a **mini** `UIMusicStaffView` that draws only **one** note (and its extra
+/// ledger lines). This allows each note to scroll independently while still using
+/// the original UIKit drawing logic.
 @available(iOS 15.0, *)
 private struct NoteView: UIViewRepresentable {
     let note: MusicNote
@@ -238,17 +362,21 @@ private struct NoteView: UIViewRepresentable {
     }
 }
 
-// MARK: - UIKit micro view for a single note (with its own ledger lines)
+// MARK: - UIKit micro-view: one note + custom ledger lines --------------------
 
+/// Tiny subclass of `UIMusicStaffView` that draws **only** the glyph (note head,
+/// stem, accidental…) and **its own** ledger lines. The main staff is hidden for
+/// this mini-view so that we can overlay it on top of the static, non-scrolling
+/// staff without visual duplication.
 @available(iOS 15.0, *)
 private final class MiniNoteStaffView: UIMusicStaffView {
 
-    // Cached state
+    // --- Cached configuration (kept to avoid rebuilding everything each frame)
     private var desiredHeight: CGFloat = 0
     private var cachedNote: MusicNote?
     private var cachedClef: MusicClef = .treble
 
-    /// Multiplier used to define the drawn ledger line length relative to the note head’s width.
+    /// Extra width of ledger lines relative to the note head width.
     private let ledgerExtraWidthFactor: CGFloat = 1.6
 
     // MARK: Init
@@ -258,41 +386,44 @@ private final class MiniNoteStaffView: UIMusicStaffView {
          desiredHeight: CGFloat,
          maxLedgerLines: Int) {
         self.desiredHeight = desiredHeight
-        self.cachedNote = note
-        self.cachedClef = clef
+        self.cachedNote    = note
+        self.cachedClef    = clef
 
         super.init(frame: CGRect(origin: .zero,
                                  size: CGSize(width: 1, height: desiredHeight)))
 
-        self.maxLedgerLines = maxLedgerLines
-        self.fitsStaffToBounds = false
-        self.shouldDrawClef = false
+        // Configuration of the underlying UIMusicStaffView.
+        self.maxLedgerLines     = maxLedgerLines
+        self.fitsStaffToBounds  = false
+        self.shouldDrawClef     = false   // no clef per note
         self.shouldDrawNaturals = false
-        self.spacing = .preferred
+        self.spacing            = .preferred
 
-        // Hide the staff lines in this per-note view: we only want the glyph + ledger lines.
+        // Hide the staff lines for this mini-view; we only want the glyph + ledgers.
         self.staffColor = .clear
 
+        // Initial element set.
         self.elementArray = [clef, note]
         self.setNeedsDisplay()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    // MARK: Public update API
+    // MARK: Public update
 
+    /// Updates the internal state when the SwiftUI wrapper reuses the view.
     func update(note: MusicNote,
                 clef: MusicClef,
                 desiredHeight: CGFloat,
                 maxLedgerLines: Int) {
-        self.desiredHeight = desiredHeight
-        self.cachedNote = note
-        self.cachedClef = clef
+        self.desiredHeight       = desiredHeight
+        self.cachedNote          = note
+        self.cachedClef          = clef
+        self.maxLedgerLines      = maxLedgerLines
+        self.shouldDrawNaturals  = false
+        self.elementArray        = [clef, note]
 
-        self.maxLedgerLines = maxLedgerLines
-        self.shouldDrawNaturals = false
-        self.elementArray = [clef, note]
-
+        // Keep our view size consistent; width is mostly irrelevant (we offset).
         var f = self.frame
         f.size.height = desiredHeight
         if f.size.width == 0 { f.size.width = 1 }
@@ -302,46 +433,50 @@ private final class MiniNoteStaffView: UIMusicStaffView {
         self.setNeedsDisplay()
     }
 
-    // MARK: - Layout & drawing
+    // MARK: Layout
 
+    /// Ensure the staff stays hidden & the height remains what we requested.
     override func layoutSubviews() {
         super.layoutSubviews()
         if frame.height != desiredHeight {
             frame.size.height = desiredHeight
         }
-        // Ensure the underlying staff stays hidden.
         self.staffLayer.strokeColor = UIColor.clear.cgColor
     }
 
-    /// We override `setupLayers()` to add custom ledger lines that move with the note.
+    // MARK: Custom ledger lines
+
+    /// We override `setupLayers()` to draw **our own** ledger lines for the single
+    /// note we display, so they move perfectly with the glyph.
     override public func setupLayers() {
         super.setupLayers()
 
         guard let note = cachedNote else { return }
 
-        // Remove any previous custom ledger layers.
+        // Remove previously added custom ledger layers to avoid stacking them up.
         elementDisplayLayer.sublayers?
             .filter { $0.name == "LedgerLinesLayer" }
             .forEach { $0.removeFromSuperlayer() }
 
-        // How many ledger lines does this note need?
+        // How many ledger lines do we actually need?
         let req = note.requiredLedgerLines(in: cachedClef)
         guard req != 0 else { return }
 
-        // Compute a robust bounding box for the note head and its accessories.
+        // Robust bounding box that encloses all note-related sublayers (head/stem/accidental).
         let bbox = elementDisplayLayer.sublayers?
             .reduce(into: CGRect.null) { rect, layer in
                 rect = rect.union(layer.frame)
             } ?? .zero
 
-        let centerX = bbox.midX
+        // Compute line width and position around the note head.
+        let centerX        = bbox.midX
         let headApproxWidth = bbox.width
         let w = max(headApproxWidth * ledgerExtraWidthFactor, spaceWidth * 2.0)
 
-        // Vertical centerline provided by UIMusicStaffView.
+        // Staff centerline provided by UIMusicStaffView (now public via `staffCenterlineY`).
         let centerY = self.staffCenterlineY
 
-        // Draw the ledger lines above/below, starting from the first line outside the 5-line staff.
+        // Build one path containing all ledger segments.
         let path = CGMutablePath()
 
         if req > 0 {
@@ -360,14 +495,15 @@ private final class MiniNoteStaffView: UIMusicStaffView {
             }
         }
 
+        // Final layer that we add on top of the note layers.
         let ledger = CAShapeLayer()
-        ledger.name = "LedgerLinesLayer"
-        ledger.path = path
-        ledger.strokeColor = UIColor.label.cgColor
-        ledger.lineWidth = self.staffLineThickness
-        ledger.fillColor = UIColor.clear.cgColor
+        ledger.name         = "LedgerLinesLayer"
+        ledger.path         = path
+        ledger.strokeColor  = UIColor.label.cgColor
+        ledger.lineWidth    = self.staffLineThickness
+        ledger.fillColor    = UIColor.clear.cgColor
         ledger.contentsScale = UIScreen.main.scale
-        ledger.lineCap = .round
+        ledger.lineCap      = .round
 
         elementDisplayLayer.addSublayer(ledger)
     }
