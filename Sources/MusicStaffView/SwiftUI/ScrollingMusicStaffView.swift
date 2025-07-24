@@ -15,7 +15,8 @@ public struct ScrollingMusicStaffView: View {
     private let maxLedgerLines: Int
     private let spaceWidth: CGFloat
     private let beatGapBetweenNotes: Double
-
+    private let visualScale: CGFloat
+    
     @StateObject private var model: ScrollingMusicStaffViewModel
 
     public init(
@@ -25,7 +26,8 @@ public struct ScrollingMusicStaffView: View {
         initialNotes: [MusicNote] = [],
         maxLedgerLines: Int = 4,
         spaceWidth: CGFloat = 8,
-        beatGapBetweenNotes: Double = 1.0
+        beatGapBetweenNotes: Double = 1.0,
+        visualScale: CGFloat = 1.2            // ⬅️ +20% par défaut
     ) {
         let seeds = initialNotes.map {
             ScrollingMusicStaffViewModel.ScrollingNoteInput($0, duration: .quarter)
@@ -44,10 +46,12 @@ public struct ScrollingMusicStaffView: View {
         self.maxLedgerLines = maxLedgerLines
         self.spaceWidth = spaceWidth
         self.beatGapBetweenNotes = beatGapBetweenNotes
+        self.visualScale = visualScale
     }
 
     public var body: some View {
-        let height = StaffMetrics.height(spaceWidth: spaceWidth,
+        let scaledSpaceWidth = spaceWidth * visualScale
+        let height = StaffMetrics.height(spaceWidth: scaledSpaceWidth,
                                          maxLedgerLines: maxLedgerLines)
 
         return GeometryReader { geo in
