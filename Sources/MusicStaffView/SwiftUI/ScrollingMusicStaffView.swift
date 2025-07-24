@@ -9,28 +9,23 @@ import SwiftUI
 import Music
 import UIKit
 
-// MARK: - Public Scrolling View
-
 @available(iOS 15.0, *)
 public struct ScrollingMusicStaffView: View {
 
-    // ---- Public configuration kept locally so the SwiftUI View stays value-type
     private let maxLedgerLines: Int
     private let spaceWidth: CGFloat
     private let beatGapBetweenNotes: Double
 
-    // ---- Reactive model that does the timing / scrolling
     @StateObject private var model: ScrollingMusicStaffViewModel
 
-    // MARK: Init
     public init(
         bpm: Double,
         clef: MusicClef = .treble,
         spacingStrategy: NoteSpacingStrategy = .fromPreferredOrDefault(),
         initialNotes: [MusicNote] = [],
         maxLedgerLines: Int = 4,
-        spaceWidth: CGFloat = 8,              // vertical density controller
-        beatGapBetweenNotes: Double = 0.25    // horizontal gap in beats
+        spaceWidth: CGFloat = 8,
+        beatGapBetweenNotes: Double = 1.0
     ) {
         let seeds = initialNotes.map {
             ScrollingMusicStaffViewModel.ScrollingNoteInput($0, duration: .quarter)
@@ -51,16 +46,13 @@ public struct ScrollingMusicStaffView: View {
         self.beatGapBetweenNotes = beatGapBetweenNotes
     }
 
-    // MARK: Body
     public var body: some View {
-        // Same height for the static staff and every note mini-view.
         let height = StaffMetrics.height(spaceWidth: spaceWidth,
                                          maxLedgerLines: maxLedgerLines)
 
         return GeometryReader { geo in
             ZStack(alignment: .topLeading) {
 
-                // 1) Static, non-moving staff
                 StaffLayer(
                     clef: model.clef,
                     maxLedgerLines: maxLedgerLines,
@@ -71,7 +63,6 @@ public struct ScrollingMusicStaffView: View {
                        alignment: .topLeading)
                 .allowsHitTesting(false)
 
-                // 2) Foreground moving notes – each note is its own tiny UIMusicStaffView
                 ForEach(model.notes) { scrolling in
                     NoteView(
                         note: scrolling.note,
@@ -93,17 +84,13 @@ public struct ScrollingMusicStaffView: View {
             }
             .onDisappear { model.stop() }
         }
-        .frame(height: height) // avoids clipping of very high/low notes & clef
+        .frame(height: height)
     }
 
-    // MARK: - Public API passthroughs
-
-    /// Change tempo live.
     public func setBPM(_ newBPM: Double) {
         model.bpm = newBPM
     }
 
-    /// Queue extra notes to scroll.
     public func addNotes(_ notes: [MusicNote]) {
         let inputs = notes.map {
             ScrollingMusicStaffViewModel.ScrollingNoteInput($0, duration: .quarter)
@@ -111,33 +98,17 @@ public struct ScrollingMusicStaffView: View {
         model.enqueue(inputs)
     }
 
-    /// Convenience access to the left-most visible note (if your VM exposes it).
     public var leftMostVisibleNote: MusicNote? {
         model.leftMostVisibleNote
     }
 }
 
-// MARK: - Staff metrics helper
-
 @available(iOS 15.0, *)
 private enum StaffMetrics {
-    /// Height of a staff *including* the space reserved for the `maxLedgerLines`
-    /// above and below, when `fitsStaffToBounds == false`.
-    ///
-    /// In `UIMusicStaffView.spaceWidth`, the formula is:
-    ///   `spaceWidth = bounds.height / (6.0 + CGFloat(ledgerAbove + ledgerBelow))`
-    ///
-    /// If we want to *fix* `spaceWidth`, we invert it:
-    ///   `bounds.height = spaceWidth * (6 + ledgerAbove + ledgerBelow)`
-    ///
-    /// With symmetric `maxLedgerLines` above/below:
-    ///   `bounds.height = spaceWidth * (6 + 2*maxLedgerLines)`
     static func height(spaceWidth: CGFloat, maxLedgerLines: Int) -> CGFloat {
         spaceWidth * (6.0 + CGFloat(2 * maxLedgerLines))
     }
 }
-
-// MARK: - Static staff (lines + clef)
 
 @available(iOS 15.0, *)
 private struct StaffLayer: UIViewRepresentable {
@@ -150,6 +121,7 @@ private struct StaffLayer: UIViewRepresentable {
         v.elementArray = [clef]
         v.maxLedgerLines = maxLedgerLines
         v.shouldDrawClef = true
+        v.shouldDrawNaturals = false
         v.fitsStaffToBounds = fitsToBounds
         v.spacing = .uniformTrailingSpace
         v.isUserInteractionEnabled = false
@@ -164,12 +136,6 @@ private struct StaffLayer: UIViewRepresentable {
     }
 }
 
-// MARK: - One note wrapper
-
-/// One SwiftUI wrapper around a tiny `UIMusicStaffView` that draws only
-/// the note (with its accidentals, stems…) on top of the main static staff.
-/// The view’s *height* is forced to the global staff height so the centerline
-/// matches and vertical positioning stays correct.
 @available(iOS 15.0, *)
 private struct NoteView: UIViewRepresentable {
     let note: MusicNote
@@ -196,28 +162,36 @@ private struct NoteView: UIViewRepresentable {
     }
 }
 
-// MARK: - UIKit micro-view that leverages UIMusicStaffView to draw the note
-
 @available(iOS 15.0, *)
 private final class MiniNoteStaffView: UIMusicStaffView {
 
     private var desiredHeight: CGFloat = 0
+    private var cachedNote: MusicNote?
+    private var cachedClef: MusicClef = .treble
 
-    // Designated init
+    private let ledgerExtraWidthFactor: CGFloat = 1.6
+
     init(note: MusicNote,
          clef: MusicClef,
          desiredHeight: CGFloat,
          maxLedgerLines: Int)
     {
         self.desiredHeight = desiredHeight
+        self.cachedNote = note
+        self.cachedClef = clef
+
         super.init(frame: CGRect(origin: .zero,
                                  size: CGSize(width: 1, height: desiredHeight)))
 
         self.maxLedgerLines = maxLedgerLines
         self.fitsStaffToBounds = false
-        self.shouldDrawClef = false                // ← no clef per-note
+        self.shouldDrawClef = false
+        self.shouldDrawNaturals = false
         self.spacing = .preferred
-        self.staffColor = .clear                   // hide staff lines
+
+        // on cache la portée de cette mini-vue
+        self.staffColor = .clear
+
         self.elementArray = [clef, note]
         self.setNeedsDisplay()
     }
@@ -230,10 +204,13 @@ private final class MiniNoteStaffView: UIMusicStaffView {
                 maxLedgerLines: Int)
     {
         self.desiredHeight = desiredHeight
+        self.cachedNote = note
+        self.cachedClef = clef
+
         self.maxLedgerLines = maxLedgerLines
+        self.shouldDrawNaturals = false
         self.elementArray = [clef, note]
 
-        // Force the same height as the main staff so the centerline matches.
         var f = self.frame
         f.size.height = desiredHeight
         if f.size.width == 0 { f.size.width = 1 }
@@ -243,13 +220,65 @@ private final class MiniNoteStaffView: UIMusicStaffView {
         self.setNeedsDisplay()
     }
 
-    // Ensure height stays what we asked for if the system relayouts us.
     override func layoutSubviews() {
         super.layoutSubviews()
         if frame.height != desiredHeight {
             frame.size.height = desiredHeight
         }
-        // Ensure staff lines stay hidden (setupLayers may reset colors)
         self.staffLayer.strokeColor = UIColor.clear.cgColor
+    }
+
+    override public func setupLayers() {
+        super.setupLayers()
+
+        guard let note = cachedNote else { return }
+
+        // supprime les précédentes
+        elementDisplayLayer.sublayers?
+            .filter { $0.name == "LedgerLinesLayer" }
+            .forEach { $0.removeFromSuperlayer() }
+
+        let req = note.requiredLedgerLines(in: cachedClef)
+        guard req != 0 else { return }
+
+        // bounding box de la note (et accessoires) pour obtenir un X central robuste
+        let bbox = elementDisplayLayer.sublayers?
+            .reduce(into: CGRect.null) { rect, layer in
+                rect = rect.union(layer.frame)
+            } ?? .zero
+
+        let centerX = bbox.midX
+        let headApproxWidth = bbox.width   // pas parfait, mais suffisant pour dimensionner les traits
+        let w = max(headApproxWidth * ledgerExtraWidthFactor, spaceWidth * 2.0)
+
+        // utilise le centre fourni par UIMusicStaffView
+        let centerY = self.staffCenterlineY
+
+        let path = CGMutablePath()
+
+        if req > 0 {
+            for i in 0..<req {
+                let y = centerY - (CGFloat(3 + i) * self.spaceWidth)
+                path.move(to: CGPoint(x: centerX - w / 2, y: y))
+                path.addLine(to: CGPoint(x: centerX + w / 2, y: y))
+            }
+        } else {
+            for i in 0..<abs(req) {
+                let y = centerY + (CGFloat(3 + i) * self.spaceWidth)
+                path.move(to: CGPoint(x: centerX - w / 2, y: y))
+                path.addLine(to: CGPoint(x: centerX + w / 2, y: y))
+            }
+        }
+
+        let ledger = CAShapeLayer()
+        ledger.name = "LedgerLinesLayer"
+        ledger.path = path
+        ledger.strokeColor = UIColor.label.cgColor
+        ledger.lineWidth = self.staffLineThickness
+        ledger.fillColor = UIColor.clear.cgColor
+        ledger.contentsScale = UIScreen.main.scale
+        ledger.lineCap = .round
+
+        elementDisplayLayer.addSublayer(ledger)
     }
 }
