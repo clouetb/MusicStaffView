@@ -1,19 +1,19 @@
 {
-  "originHash" : "987aa8d0e9598072ccca34daa042570788277e8d5d3725768d82ec50b07b76da",
+  "originHash" : "653b3a29d750753f749018b823f3500b6502d699bf799d4728cd20d7cce8473a",
   "pins" : [
     {
       "identity" : "music",
       "kind" : "remoteSourceControl",
-      "location" : "git@github.com:mmuszynski/Music.git",
+      "location" : "https://github.com/mmuszynski/Music.git",
       "state" : {
-        "revision" : "cd8fffed39fb1be03364f6148b637de119e95a33",
-        "version" : "1.0.5"
+        "revision" : "b799ebda47b53441986ecf5d5abbcf26b26f5da8",
+        "version" : "1.0.4"
       }
     },
     {
       "identity" : "svgparser",
       "kind" : "remoteSourceControl",
-      "location" : "git@bitbucket.org:mmuszynski/svgparser.git",
+      "location" : "https://github.com/mmuszynski/SVGParser.git",
       "state" : {
         "revision" : "f352a65061f3363d5f4ad60b58dae81df4d20830",
         "version" : "0.0.15"

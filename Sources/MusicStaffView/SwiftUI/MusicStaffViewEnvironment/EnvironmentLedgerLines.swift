@@ -45,7 +45,7 @@ extension EnvironmentValues {
     @Entry var maxLedgerLines: Int = 2
 }
 
-extension View {
+public extension View {
     func maxLedgerLines(_ maxLedgerLines: Int) -> some View {
         environment(\.maxLedgerLines, maxLedgerLines)
     }
