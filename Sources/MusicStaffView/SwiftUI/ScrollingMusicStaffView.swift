@@ -12,17 +12,23 @@ import UIKit
 @available(iOS 15.0, *)
 public struct ScrollingMusicStaffView: View {
 
+    // ---------- Public configuration ----------
     private let maxLedgerLines: Int
     private let spaceWidth: CGFloat
     private let beatGapBetweenNotes: Double
     private let visualScale: CGFloat
     
-    /// Largeur (en “espaces”) à gauche où l’on choisit de **ne pas dessiner** les notes
-    /// (pour qu’elles disparaissent avant de passer sous la clé).
-    private let hideLeftWidthInSpaces: CGFloat = 3.2   // ajuste à ton goût
-    
-    @StateObject private var model: ScrollingMusicStaffViewModel
+    /// Petit padding (en espaces) ajouté à la largeur mesurée de la clé
+    private let clefPaddingInSpaces: CGFloat = 0.3
 
+    // ---------- Reactive model ----------
+    @StateObject private var model: ScrollingMusicStaffViewModel
+    
+    // ---------- Mesure runtime ----------
+    /// Largeur *réelle* (en points) de la clé de sol (mesurée côté UIKit)
+    @State private var clefPixelWidth: CGFloat = 0
+
+    // MARK: - Init
     public init(
         bpm: Double,
         clef: MusicClef = .treble,
@@ -53,46 +59,51 @@ public struct ScrollingMusicStaffView: View {
         self.visualScale = visualScale
     }
 
+    // MARK: - Body
     public var body: some View {
-        // On “grossit” la portée en jouant sur sa hauteur (donc son spaceWidth implicite)
         let scaledSpaceWidth = spaceWidth * visualScale
         let height = StaffMetrics.height(spaceWidth: scaledSpaceWidth,
                                          maxLedgerLines: maxLedgerLines)
 
-        // Zone dans laquelle on **ne dessine pas** les notes
-        // (approx : largeur de la clé + un petit padding)
-        let leftKillX = hideLeftWidthInSpaces * scaledSpaceWidth
-
         return GeometryReader { geo in
             ZStack(alignment: .topLeading) {
 
-                // 1) Portée fixe (clé + 5 lignes)
+                // 1) Portée fixe (clé + 5 lignes) – NON masquée
                 StaffLayer(
                     clef: model.clef,
                     maxLedgerLines: maxLedgerLines,
-                    fitsToBounds: false
+                    fitsToBounds: false,
+                    clefWidth: $clefPixelWidth
                 )
                 .frame(maxWidth: .infinity,
                        maxHeight: .infinity,
                        alignment: .topLeading)
                 .allowsHitTesting(false)
 
-                // 2) Notes (avec leurs ledger lines)
-                //    👉 on filtre ici celles qui seraient déjà passées derrière la clé
-                let visibleNotes = model.notes.filter {
-                    model.xPosition(for: $0) > leftKillX
+                // 2) Notes + ledger lines – MASQUÉES à gauche du rideau
+                ZStack(alignment: .topLeading) {
+                    ForEach(model.notes) { scrolling in
+                        NoteView(
+                            note: scrolling.note,
+                            clef: model.clef,
+                            maxLedgerLines: maxLedgerLines,
+                            desiredHeight: height
+                        )
+                        .offset(x: model.xPosition(for: scrolling), y: 0)
+                        .allowsHitTesting(false)
+                    }
                 }
-                
-                ForEach(visibleNotes) { scrolling in
-                    NoteView(
-                        note: scrolling.note,
-                        clef: model.clef,
-                        maxLedgerLines: maxLedgerLines,
-                        desiredHeight: height
-                    )
-                    .offset(x: model.xPosition(for: scrolling), y: 0)
-                    .allowsHitTesting(false)
-                }
+                .mask(
+                    Rectangle()
+                        .frame(
+                            width: max(
+                                0,
+                                geo.size.width - (clefPixelWidth + clefPaddingInSpaces * scaledSpaceWidth)
+                            ),
+                            height: geo.size.height
+                        )
+                        .offset(x: clefPixelWidth + clefPaddingInSpaces * scaledSpaceWidth)
+                )
             }
             .clipped()
             .onAppear {
@@ -106,6 +117,8 @@ public struct ScrollingMusicStaffView: View {
         }
         .frame(height: height)
     }
+
+    // MARK: - Public API passthroughs
 
     public func setBPM(_ newBPM: Double) {
         model.bpm = newBPM
@@ -139,6 +152,9 @@ private struct StaffLayer: UIViewRepresentable {
     let clef: MusicClef
     let maxLedgerLines: Int
     let fitsToBounds: Bool
+    
+    /// Binding pour renvoyer vers SwiftUI la largeur *réelle* de la clé
+    @Binding var clefWidth: CGFloat
 
     func makeUIView(context: Context) -> UIMusicStaffView {
         let v = UIMusicStaffView()
@@ -157,6 +173,15 @@ private struct StaffLayer: UIViewRepresentable {
         uiView.maxLedgerLines = maxLedgerLines
         uiView.fitsStaffToBounds = fitsToBounds
         uiView.setNeedsDisplay()
+        
+        // Mesure **robuste** : le premier sublayer de elementDisplayLayer correspond à la clé
+        DispatchQueue.main.async {
+            guard let clefLayer = uiView.elementDisplayLayer.sublayers?.first else { return }
+            let width = clefLayer.bounds.width
+            if abs(self.clefWidth - width) > 0.5 {
+                self.clefWidth = width
+            }
+        }
     }
 }
 
