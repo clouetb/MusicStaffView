@@ -17,6 +17,10 @@ public struct ScrollingMusicStaffView: View {
     private let beatGapBetweenNotes: Double
     private let visualScale: CGFloat
     
+    /// Largeur (en “espaces”) à gauche où l’on choisit de **ne pas dessiner** les notes
+    /// (pour qu’elles disparaissent avant de passer sous la clé).
+    private let hideLeftWidthInSpaces: CGFloat = 3.2   // ajuste à ton goût
+    
     @StateObject private var model: ScrollingMusicStaffViewModel
 
     public init(
@@ -27,7 +31,7 @@ public struct ScrollingMusicStaffView: View {
         maxLedgerLines: Int = 4,
         spaceWidth: CGFloat = 8,
         beatGapBetweenNotes: Double = 1.0,
-        visualScale: CGFloat = 1.2            // ⬅️ +20% par défaut
+        visualScale: CGFloat = 1.2            // +20% par défaut
     ) {
         let seeds = initialNotes.map {
             ScrollingMusicStaffViewModel.ScrollingNoteInput($0, duration: .quarter)
@@ -50,13 +54,19 @@ public struct ScrollingMusicStaffView: View {
     }
 
     public var body: some View {
+        // On “grossit” la portée en jouant sur sa hauteur (donc son spaceWidth implicite)
         let scaledSpaceWidth = spaceWidth * visualScale
         let height = StaffMetrics.height(spaceWidth: scaledSpaceWidth,
                                          maxLedgerLines: maxLedgerLines)
 
+        // Zone dans laquelle on **ne dessine pas** les notes
+        // (approx : largeur de la clé + un petit padding)
+        let leftKillX = hideLeftWidthInSpaces * scaledSpaceWidth
+
         return GeometryReader { geo in
             ZStack(alignment: .topLeading) {
 
+                // 1) Portée fixe (clé + 5 lignes)
                 StaffLayer(
                     clef: model.clef,
                     maxLedgerLines: maxLedgerLines,
@@ -67,7 +77,13 @@ public struct ScrollingMusicStaffView: View {
                        alignment: .topLeading)
                 .allowsHitTesting(false)
 
-                ForEach(model.notes) { scrolling in
+                // 2) Notes (avec leurs ledger lines)
+                //    👉 on filtre ici celles qui seraient déjà passées derrière la clé
+                let visibleNotes = model.notes.filter {
+                    model.xPosition(for: $0) > leftKillX
+                }
+                
+                ForEach(visibleNotes) { scrolling in
                     NoteView(
                         note: scrolling.note,
                         clef: model.clef,
@@ -107,12 +123,16 @@ public struct ScrollingMusicStaffView: View {
     }
 }
 
+// MARK: - Staff metrics helper
+
 @available(iOS 15.0, *)
 private enum StaffMetrics {
     static func height(spaceWidth: CGFloat, maxLedgerLines: Int) -> CGFloat {
         spaceWidth * (6.0 + CGFloat(2 * maxLedgerLines))
     }
 }
+
+// MARK: - Static staff (lines + clef, sans notes)
 
 @available(iOS 15.0, *)
 private struct StaffLayer: UIViewRepresentable {
@@ -140,6 +160,8 @@ private struct StaffLayer: UIViewRepresentable {
     }
 }
 
+// MARK: - One note wrapper
+
 @available(iOS 15.0, *)
 private struct NoteView: UIViewRepresentable {
     let note: MusicNote
@@ -165,6 +187,8 @@ private struct NoteView: UIViewRepresentable {
                       maxLedgerLines: maxLedgerLines)
     }
 }
+
+// MARK: - UIKit micro-view: draws the note + its own moving ledger lines
 
 @available(iOS 15.0, *)
 private final class MiniNoteStaffView: UIMusicStaffView {
@@ -193,7 +217,7 @@ private final class MiniNoteStaffView: UIMusicStaffView {
         self.shouldDrawNaturals = false
         self.spacing = .preferred
 
-        // on cache la portée de cette mini-vue
+        // on cache la portée de cette mini-vue (on ne veut que la note + ledger lines)
         self.staffColor = .clear
 
         self.elementArray = [clef, note]
@@ -252,10 +276,9 @@ private final class MiniNoteStaffView: UIMusicStaffView {
             } ?? .zero
 
         let centerX = bbox.midX
-        let headApproxWidth = bbox.width   // pas parfait, mais suffisant pour dimensionner les traits
+        let headApproxWidth = bbox.width
         let w = max(headApproxWidth * ledgerExtraWidthFactor, spaceWidth * 2.0)
 
-        // utilise le centre fourni par UIMusicStaffView
         let centerY = self.staffCenterlineY
 
         let path = CGMutablePath()
