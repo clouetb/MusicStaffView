@@ -7,30 +7,50 @@
 
 import CoreGraphics
 
-/// Describes the policy used to determine the horizontal distance between the
-/// start-positions of two consecutive quarter-notes.
+/// Strategy describing how to compute the horizontal distance (in **points**) between
+/// the start positions of two consecutive **quarter-notes** on the scrolling staff.
+///
+/// The value returned by `pixels(for:preferred:)` is later converted to px-per-beat
+/// and finally to an on-screen X offset by the view-model.
 public enum NoteSpacingStrategy: Sendable, Equatable {
-    
-    /// Ask the underlying `UIMusicStaffView` (or SwiftUI wrapper) for its
-    /// `preferredHorizontalSpacing`; when that value equals `0` the fallback is
-    /// `staffSpaceHeight * defaultMultiplier` (≈ one note-head width plus a bit of air).
+
+    // MARK: - Cases
+
+    /// Use the staff view’s `preferredHorizontalSpacing` when available and > 0.
+    /// Otherwise, fall back to `staffSpaceHeight * defaultMultiplier`.
+    ///
+    /// - Parameter defaultMultiplier:
+    ///   Multiplicative factor applied to `staffSpaceHeight` (the distance between two
+    ///   staff **lines** in points) to obtain a sensible default note spacing when
+    ///   the staff view does not provide any preferred spacing (or returns 0).
+    ///
+    /// Typical values are around **1.5–2.0**, which roughly equals one note-head width
+    /// plus a bit of padding.
     case fromPreferredOrDefault(defaultMultiplier: CGFloat = 1.75)
-    
-    /// Always use the supplied pixel value, ignoring whatever the staff view prefers.
+
+    /// Always use a fixed, absolute pixel value, ignoring any staff view preference.
     case fixed(CGFloat)
-    
-    /// Returns the actual pixel distance to use.
+
+    // MARK: - API
+
+    /// Compute the horizontal spacing to use for **one quarter-note beat**.
+    ///
     /// - Parameters:
-    ///   - staffSpaceHeight: Distance between two staff lines in points.
-    ///   - preferred: The staff view’s preferred spacing or `nil` if unknown.
-    /// - Returns: Spacing in *device* points.
-    public func pixels(for staffSpaceHeight: CGFloat,
-                       preferred: CGFloat?) -> CGFloat {
+    ///   - staffSpaceHeight: The distance between two staff **lines** (not spaces) in points.
+    ///   - preferred: The staff view’s preferred spacing (if any). `nil` means “unknown”.
+    /// - Returns: The spacing in device points.
+    public func pixels(
+        for staffSpaceHeight: CGFloat,
+        preferred: CGFloat?
+    ) -> CGFloat {
         switch self {
         case let .fixed(px):
             return px
+
         case let .fromPreferredOrDefault(multiplier):
-            if let p = preferred, p > 0 { return p }
+            if let p = preferred, p > 0 {
+                return p
+            }
             return staffSpaceHeight * multiplier
         }
     }
