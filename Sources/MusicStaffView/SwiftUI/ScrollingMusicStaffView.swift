@@ -74,11 +74,11 @@ public struct ScrollingMusicStaffView: View {
         initialNotes: [MusicNote] = [],
         maxLedgerLines: Int = 4,
         spaceWidth: CGFloat = 8,
-        beatGapBetweenNotes: Double = 1.0,
+        beatGapBetweenNotes: Double = 0,
         visualScale: CGFloat = 1.2,
         scrollPixelsPerBeat: CGFloat = 120,          // Visual horizontal speed.
-        clefPaddingInSpaces: CGFloat = 0.0,
-        playheadOffsetInSpaces: CGFloat = 1.6,
+        clefPaddingInSpaces: CGFloat = -1,
+        playheadOffsetInSpaces: CGFloat = 4,
         playheadWidth: CGFloat = 3.0,
         playheadColor: Color = .red.opacity(0.9)
     ) {
