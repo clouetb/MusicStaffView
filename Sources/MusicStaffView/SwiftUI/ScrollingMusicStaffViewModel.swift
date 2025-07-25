@@ -2,15 +2,16 @@
 //  ScrollingMusicStaffViewModel.swift
 //  MusicStaffView – Scrolling extension
 //
-//  Drives time-keeping, prunes off-screen notes and exposes reactive state to
+//  Drives time-keeping, culls off-screen notes and exposes reactive state to
 //  SwiftUI. The whole type is isolated to the **main actor** because it relies
 //  on UIKit classes (`CADisplayLink`, `UIScreen`) and updates `@Published`
 //  properties that directly feed SwiftUI views.
 //
 //  Updated 28 Jul 2025
-//  - `pxPerBeat` is now injected from the SwiftUI layer through
-//    `updatePixelsPerBeat(pixels:)`, so BPM changes always impact speed.
-//  - `payingNote` is the note under the fixed red playhead.
+//  - `pxPerBeat` is injected from SwiftUI through `updatePixelsPerBeat(pixels:)`
+//    so BPM changes always impact speed.
+//  - `payingNote` is now the note whose **head has just crossed** (or is exactly
+//    under) the *real* red playhead X position (`playheadX`).
 //
 
 import SwiftUI
@@ -45,9 +46,8 @@ final class ScrollingMusicStaffViewModel: ObservableObject {
     }
 
     /// Internal representation of a note placed on the scrolling timeline.
-    ///
-    /// `startBeat` is the logical beat position (relative to `currentBeat`) at
-    /// which the note head will be located at `leadingInset` (x == `leadingInset`).
+    /// `startBeat` is the logical beat position (relative to `currentBeat`) at which
+    /// the note head reaches the leading inset (x == `leadingInset`).
     struct ScrollingNote: Identifiable, Sendable {
         let id = UUID()
         let note: MusicNote
@@ -57,66 +57,55 @@ final class ScrollingMusicStaffViewModel: ObservableObject {
 
     // MARK: - Published state consumed by SwiftUI -----------------------------
 
-    /// Tempo in quarter-notes per minute. Mutating this immediately changes the
-    /// conversion from wall-clock seconds to beats.
+    /// Tempo in quarter-notes per minute. Mutating this immediately changes scroll speed.
     @Published var bpm: Double
 
-    /// Notes that are still visible (or about to enter from the right).
+    /// Notes that are still visible or about to enter from the right.
     @Published private(set) var notes: [ScrollingNote] = []
 
-    /// The note that currently lies under the fixed red playhead.
+    /// The note whose **head has most recently crossed the red playhead**.
     @Published private(set) var payingNote: MusicNote?
 
     // MARK: - Immutable configuration ----------------------------------------
 
-    /// Clef used for vertical positioning (if needed outside UIKit drawing).
+    /// Clef used to compute vertical positions outside of UIKit drawing.
     let clef: MusicClef
 
-    /// Strategy that originally provided pixels per beat. We keep it for
-    /// completeness, but the SwiftUI layer now injects the final pxPerBeat.
+    /// Strategy that converts musical spacing to pixels (px per beat).
     private let spacingStrategy: NoteSpacingStrategy
 
-    /// Leading inset (in pixels) so the note head is fully gone before `x < 0`.
-    private let leadingInset: CGFloat
-
-    /// Extra horizontal space between enqueued notes, expressed in beats.
-    /// (e.g. 0.25 = an empty eighth-note between two consecutive heads).
+    /// Extra horizontal space, expressed in beats, inserted between successive notes.
     private let beatGapBetweenNotes: Double
 
-    // MARK: - Runtime mutable state (not published) ---------------------------
+    /// How far from the left edge a head must be before it is considered "entered".
+    /// (1 beat worth of pixels so the glyph fully disappears before removal.)
+    private let leadingInset: CGFloat
 
-    /// Pixels used to represent one beat (¼-note). It is **actively** injected
-    /// from the SwiftUI layer so that changing BPM updates the perceived speed.
+    // MARK: - Runtime mutable (not published) --------------------------------
+
+    /// Pixels representing one beat (¼-note). Injected from SwiftUI so we can
+    /// decouple visual speed from the internal spacing strategy.
     private var pxPerBeat: CGFloat
 
-    /// Virtual timeline cursor (in beats). This advances as frames elapse.
+    /// Virtual timeline cursor (in beats).
     private var currentBeat: Double = 0
 
-    /// Current visible width (provided by the SwiftUI view via `updateCanvasWidth`).
-    /// Not strictly required for the current logic, but kept for future culling logic.
+    /// Current visible width (provided by the SwiftUI view through `updateCanvasWidth`).
     private var canvasWidth: CGFloat = 0
 
-    /// Absolute X position (in points) of the red playhead, injected by SwiftUI.
+    /// Current absolute X position of the red playhead (provided by SwiftUI view).
     private var playheadX: CGFloat = .nan
+
+    /// Optional tolerance (in px) so you can trigger *slightly before* the head visually touches the playhead.
+    private let headHitTolerancePx: CGFloat = 30
 
     // MARK: - CADisplayLink ---------------------------------------------------
 
-    /// Frame clock used to advance the virtual timeline.
     private var displayLink: CADisplayLink?
-
-    /// Last timestamp received from the display link to compute `dt`.
     private var lastTimestamp: CFTimeInterval?
 
-    // MARK: - Initializer -----------------------------------------------------
+    // MARK: - Init ------------------------------------------------------------
 
-    /// Designated initializer.
-    ///
-    /// - Parameters:
-    ///   - bpm: Initial tempo in quarter-notes per minute.
-    ///   - clef: Clef used for vertical positioning.
-    ///   - spacing: Strategy that initially defined the px/beat conversion.
-    ///   - initialNotes: Optional notes to be placed immediately on the timeline.
-    ///   - beatGapBetweenNotes: Additional gap (in beats) inserted between note heads.
     init(
         bpm: Double,
         clef: MusicClef,
@@ -129,31 +118,24 @@ final class ScrollingMusicStaffViewModel: ObservableObject {
         self.spacingStrategy     = spacing
         self.beatGapBetweenNotes = beatGapBetweenNotes
 
-        // Provide a sane default so we can start before SwiftUI injects a real value.
-        // Baseline staff space → 4 px @1×; multiplied by screen scale for density.
+        // Give pxPerBeat a sane default; SwiftUI will override it.
         let staffSpaceHeight = UIScreen.main.scale * 4
         self.pxPerBeat       = spacing.pixels(for: staffSpaceHeight, preferred: nil)
 
-        // Use 1 beat (in pixels) as a leading inset so the head fully leaves the view
-        // before being removed.
         self.leadingInset    = pxPerBeat
 
-        // Seed the timeline queue.
         enqueue(initialNotes)
     }
 
     // MARK: - Public API ------------------------------------------------------
 
-    /// Updates the **current** pixel-per-beat ratio. This is what effectively
-    /// couples BPM (tempo) to on-screen scroll speed.
-    ///
-    /// - Important: Call this whenever BPM changes, or when you want to rescale
-    ///   horizontally without touching BPM.
+    /// Inject the visual speed (in px per beat) from the SwiftUI layer.
     func updatePixelsPerBeat(pixels: CGFloat) {
-        self.pxPerBeat = max(1, pixels)  // never allow zero or negative values
+        self.pxPerBeat = max(1, pixels)
+        // recompute paying note with the new mapping
+        recomputePayingNote()
     }
 
-    /// Starts the display link (frame clock). Should be called from `onAppear`.
     func start() {
         guard displayLink == nil else { return }
         lastTimestamp = nil
@@ -166,19 +148,16 @@ final class ScrollingMusicStaffViewModel: ObservableObject {
         displayLink = link
     }
 
-    /// Stops the display link. Should be called from `onDisappear`.
     func stop() {
         displayLink?.invalidate()
         displayLink = nil
         lastTimestamp = nil
     }
 
-    /// Enqueues a batch of notes to the right of the last scheduled one, inserting
-    /// `beatGapBetweenNotes` beats between note heads.
+    /// Enqueue one or more notes to the right of the last scheduled one.
     func enqueue(_ inputs: [ScrollingNoteInput]) {
         guard !inputs.isEmpty else { return }
 
-        // Determine starting beat for the first new note.
         var nextStart = notes.last
             .map { $0.startBeat + $0.duration.rawValue + beatGapBetweenNotes }
             ?? currentBeat
@@ -193,84 +172,80 @@ final class ScrollingMusicStaffViewModel: ObservableObject {
         }
     }
 
-    /// Called by the SwiftUI view when the viewport width changes.
     func updateCanvasWidth(_ width: CGFloat) {
         canvasWidth = width
     }
 
-    /// Injects the absolute X position of the red playhead (in points). This allows
-    /// the model to compute which note currently lies under it.
+    /// Called by the SwiftUI view whenever the playhead absolute X changes.
     func updatePlayheadX(_ x: CGFloat) {
         playheadX = x
         recomputePayingNote()
     }
 
-    /// Converts a note’s logical timeline (beats) into an on-screen X offset (points).
-    ///
-    /// The left edge of the view is 0; `leadingInset` is the position where the head
-    /// is considered to **enter** the viewport from the right.
+    /// Converts a note’s logical timeline (in beats) into an on-screen X offset (points).
     func xPosition(for note: ScrollingNote) -> CGFloat {
         leadingInset + CGFloat(note.startBeat - currentBeat) * pxPerBeat
     }
 
     // MARK: - CADisplayLink tick ---------------------------------------------
 
-    /// Frame callback. Computes time delta from the last frame and advances state.
     @objc
     private func step(_ link: CADisplayLink) {
         defer { lastTimestamp = link.timestamp }
-
-        // First frame after `start`: we only store the timestamp.
-        guard let last = lastTimestamp else { return }
-
+        guard let last = lastTimestamp else { return }   // first frame
         let dt = link.timestamp - last
         advance(by: dt)
     }
 
-    /// Advances the virtual timeline, prunes off-screen notes and recomputes the
-    /// note under the playhead.
     private func advance(by deltaSeconds: CFTimeInterval) {
-        // Convert seconds → beats using the current tempo.
+        // 1) Advance the cursor in beats.
         currentBeat += deltaSeconds * (bpm / 60.0)
 
-        // Recycle notes whose right edge is fully offscreen (left of x == 0).
+        // 2) Recycle notes whose *right-edge* is left of the viewport.
         while let first = notes.first,
               xPosition(for: first) + pxPerBeat < 0 {
             notes.removeFirst()
         }
 
-        // Update which note is currently under the red playhead.
+        // 3) Update the “note under playhead”.
         recomputePayingNote()
     }
 
     // MARK: - Paying note computation ----------------------------------------
 
-    /// Recomputes the note that currently lies under the red playhead.
+    /// Recomputes which note should be reported as `payingNote`.
     ///
-    /// The algorithm is two-stage:
-    ///  1. Find a note whose horizontal extent (head → tail) covers the playhead X.
-    ///  2. Fallback to the closest head if no exact hit is found (avoids flicker).
+    /// Definition: the **latest** note whose **head** is at or to the *left* of
+    /// the playhead (within an optional tolerance). If no head has crossed yet,
+    /// we optionally fall back to the next upcoming note (or nil).
     private func recomputePayingNote() {
         guard playheadX.isFinite else {
             payingNote = nil
             return
         }
 
-        // 1) Exact hit: the playhead lies between the head and the tail of a note.
-        if let hit = notes.first(where: { n in
+        var newestCrossed: ScrollingNote?
+        var newestHeadX: CGFloat = -.infinity
+
+        for n in notes {
             let headX = xPosition(for: n)
-            let tailX = headX + pxPerBeat * CGFloat(n.duration.rawValue)
-            return playheadX >= headX && playheadX < tailX
-        }) {
-            payingNote = hit.note
+            if headX <= playheadX + headHitTolerancePx, headX > newestHeadX {
+                newestHeadX = headX
+                newestCrossed = n
+            }
+        }
+
+        if let n = newestCrossed {
+            payingNote = n.note
             return
         }
 
-        // 2) No exact hit → take the closest head position.
-        if let closest = notes.min(by: { a, b in
-            abs(xPosition(for: a) - playheadX) < abs(xPosition(for: b) - playheadX)
-        }) {
-            payingNote = closest.note
+        // No head crossed yet: return the next upcoming one (closest on the right),
+        // or nil if there are no notes.
+        if let upcoming = notes
+            .filter({ xPosition(for: $0) > playheadX })
+            .min(by: { xPosition(for: $0) < xPosition(for: $1) }) {
+            payingNote = upcoming.note
         } else {
             payingNote = nil
         }
